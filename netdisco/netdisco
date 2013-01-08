@@ -3027,6 +3027,7 @@ sub store_vlans {
 
     my $i_vlan = $device->i_vlan();
     my $i_vlan_membership = $device->i_vlan_membership();
+    my $i_vlan_type = $device->i_vlan_type();
     my $interfaces = $device->interfaces();
 
     my %v_seen = ();
@@ -3038,6 +3039,7 @@ sub store_vlans {
 
     foreach my $if (keys %$i_vlan_membership) {
         my $port = $interfaces->{$if};
+        my $vlantype = $i_vlan_type->{$if};
         next unless defined($port);
         $v_count++;
         foreach my $vlan (@{$i_vlan_membership->{$if}}) {
@@ -3048,6 +3050,7 @@ sub store_vlans {
             $store{port} = $port;
             $store{vlan} = $vlan;
             $store{native} = $native;
+            $store{vlantype} = $vlantype;
             $store{last_discover} = 'now';
 
             insert_or_update('device_port_vlan', {ip => $ip,
@@ -4332,13 +4335,36 @@ sub graph_each  {
               );
 
     my $gv = new GraphViz(%gv);
-
+    my $gen_json=undef;
+    
+    if (defined $CONFIG{graph_json} and $CONFIG{graph_json}){
+        my $graph_json = homepath('graph_json');
+        print "  Creating json graph: $graph_json\n";
+        open (JSONFILE, '>'.$graph_json);
+        print JSONFILE "{\n";
+        print JSONFILE "  \"nodes\": [\n";
+        $gen_json=1;
+    }
+    
     my %node_map = ();
     my @nodes = $G->vertices;
+    my @my_nodes=();
     foreach my $dev (@nodes){
         my $node_name = graph_addnode($gv,$dev);
         $node_map{$dev} = $node_name;
+        #print "$dev->$node_name ".$gv->_quote_URL($node_name)."\n";
+        my %this_node=jsongraph_addnode($dev);
+        my $str="    {\n".
+                "      \"name\": \"$this_node{label}\",\n".
+                "      \"id\": \"$this_node{id}\",\n".
+                "      \"color\": \"$this_node{fillcolor}\",\n".
+                "      \"type\": \"$this_node{type}\",\n".
+                "      \"url\": \"$this_node{URL}\"\n".
+                "    }";
+        push(@my_nodes,$str)
     }
+    print JSONFILE join(',',@my_nodes) if $gen_json;
+    print JSONFILE "  ],\n" if $gen_json;
 
     my $root_ip = defined $CONFIG{root_device} ? getip($CONFIG{root_device}) : undef;
     if (defined $root_ip and defined $node_map{$root_ip}){
@@ -4350,9 +4376,12 @@ sub graph_each  {
 
     my @edges = $G->edges;
 
+    print JSONFILE "  \"links\": [\n" if $gen_json;
+    my @my_links=();
     while (my $e = shift @edges){
         my $link = $e->[0];
         my $dest = $e->[1];
+        #print $link;
         my $speed = $netdisco::GRAPH_SPEED{$link}->{$dest}->{speed};
         if (!defined($speed)) {
             print "  ! No link speed for $link -> $dest\n";
@@ -4391,9 +4420,17 @@ sub graph_each  {
             $edge{style} .= "," . $CONFIG{edge_style};
         }
 
+        my $str="    {\n".
+                "      \"source\": \"$link\",\n".
+                "      \"target\": \"$dest\"\n".
+                "    }";
+        push(@my_links,$str);
+
         $gv->add_edge($link => $dest, %edge );
     }
-
+    print JSONFILE join(',',@my_links) if $gen_json;
+    print JSONFILE "  ]}\n" if $gen_json;
+    
     print "Ignore all warnings about node size.\n";
 
     if (defined $CONFIG{graph_raw} and $CONFIG{graph_raw}){
@@ -4422,6 +4459,7 @@ sub graph_each  {
         print "  Creating SVG : $graph_svg\n";
         $gv->as_svg($graph_svg);
     }
+
 }
 
 =item graph_addnode(graphviz_obj,node_ip) 
@@ -4433,11 +4471,13 @@ Checks for mapping settings in config file and adds node to the GraphViz object.
 sub graph_addnode {
     my $gv = shift;
     # non lexical on purpose
-    use vars qw/$ip $label $isdev $devloc/;
+    use vars qw/$ip $label $isdev $devloc $devlayer $model/;
     $ip    = shift;
     $label = $netdisco::GRAPH{$ip}->{dns};
     $isdev = $netdisco::GRAPH{$ip}->{isdev};
     $devloc = $netdisco::GRAPH{$ip}->{location};
+    $devlayer = $netdisco::GRAPH{$ip}->{layer};
+    $model = $netdisco::GRAPH{$ip}->{model};
 
     my %node = ();
 
@@ -4501,6 +4541,73 @@ sub graph_addnode {
 
     my $rv = $gv->add_node($ip, %node);
     return $rv;
+}
+
+=item jsongraph_addnode(node_ip) 
+
+Checks for mapping settings in config file and adds node to the JSON object.
+
+=cut
+
+sub jsongraph_addnode {
+    # non lexical on purpose
+    use vars qw/$ip $label $isdev $devloc $devlayer $model/;
+    $ip    = shift;
+    $label = $netdisco::GRAPH{$ip}->{dns};
+    $isdev = $netdisco::GRAPH{$ip}->{isdev};
+    $devloc = $netdisco::GRAPH{$ip}->{location};
+    $devlayer = $netdisco::GRAPH{$ip}->{layer};
+    $model = $netdisco::GRAPH{$ip}->{model};
+
+    my %node = ();
+
+    $label = "($ip)" unless defined($label);
+    my $domain = $CONFIG{domain};
+    $label =~ s/\Q$domain\E//;
+    # hack
+    $label =~  s/\.resnet//;
+
+    $node{id} = $ip;
+    $node{label} = $label;
+
+    # Dereferencing the scalar by name below
+    #   requires that the variable be non-lexical (not my)
+    #   we'll create some local non-lexical versions 
+    #   that will expire at the end of this block
+    # Node Mappings
+    foreach my $map (@{$CONFIG{node_map}}){
+        my ($var,$regex,$attr,$val) = split(':',$map);
+
+        { no strict 'refs';
+           $var =  ${"$var"}; 
+        }
+
+        next unless defined $var;
+
+        if ($var =~ /$regex/) {
+            print "Giving node $ip $attr = $val\n" if $DEBUG;
+            $node{$attr} = $val;
+        }
+    }
+
+    # URL for image maps
+    if ($isdev) {
+        $node{URL} = "device.html?ip=$ip";
+        $node{type} = "device";
+    } else {
+        $node{URL} = "node.html?node=$ip";
+        $node{type} = "node";
+        # Overrides any colors given to nodes above. Bug 1094208
+        $node{fillcolor} = $CONFIG{node_problem} || 'grey';
+    }
+
+    if ($CONFIG{graph_clusters} && $devloc) {
+        my($loc) = $devloc;
+        $loc = " " . $loc if ($loc =~ /^[a-zA-Z](\w| )*$/);
+        $node{cluster} = { name => $loc };
+    }
+
+    return %node;
 }
 
 =back
