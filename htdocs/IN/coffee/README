@@ -1,0 +1,7 @@
+To recompile the coffee code (if you make changes) you will need to have the compiler installed.
+See http://coffeescript.org/ for installation instructions but also check on your system if it is not already packaged (for example Ubuntu)
+Then a simple: coffee -c vis.coffee
+
+
+Alternatively change the code to load on the coffee script on the fly through coffee.js
+
